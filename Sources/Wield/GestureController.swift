@@ -73,7 +73,9 @@ final class GestureController {
 
     private func beginMove(at location: CGPoint) -> Bool {
         guard let window = AccessibilityWindow.window(at: location),
-              let origin = window.position else {
+              let origin = window.position,
+              let size = window.size,
+              isGrabbable(window, frame: CGRect(origin: origin, size: size)) else {
             return false
         }
         window.raise()
@@ -96,7 +98,8 @@ final class GestureController {
     private func beginResize(at location: CGPoint) -> Bool {
         guard let window = AccessibilityWindow.window(at: location),
               let origin = window.position,
-              let size = window.size else {
+              let size = window.size,
+              isGrabbable(window, frame: CGRect(origin: origin, size: size)) else {
             return false
         }
         window.raise()
@@ -128,6 +131,15 @@ final class GestureController {
     private func finish() {
         mode = .idle
         targetWindow = nil
+    }
+
+    /// Windows that fill their entire display — native full screen, borderless
+    /// full-screen games, full-screen video — are left alone even while the app
+    /// is enabled, so a gesture never disturbs an immersive surface. Ordinary
+    /// windowed apps (including maximized ones that keep the menu bar visible)
+    /// remain grabbable.
+    private func isGrabbable(_ window: AccessibilityWindow, frame: CGRect) -> Bool {
+        !window.isFullScreen && !ScreenGeometry.coversWholeDisplay(frame)
     }
 
     /// Exact match on the four main modifiers so a different shortcut (e.g.

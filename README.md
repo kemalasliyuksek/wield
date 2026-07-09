@@ -14,6 +14,11 @@ macOS:
 
 Default modifier is **Option (⌥)**; changeable from the menu.
 
+**Full-screen surfaces are left alone.** Native full-screen windows, borderless
+full-screen games, and full-screen video are never moved or resized even while
+Wield is enabled — a gesture there is passed straight through to the app. Only
+windowed apps (including maximized ones that keep the menu bar visible) respond.
+
 ## Requirements
 
 - macOS 26 (Tahoe) or later
@@ -27,7 +32,11 @@ open ./Wield.app
 ```
 
 `build.sh` compiles with SwiftPM and assembles a proper `.app` bundle
-(`LSUIElement`, Info.plist, ad-hoc code signature).
+(`LSUIElement`, Info.plist, code signature). It automatically signs with the
+most durable code-signing identity it finds — a **Developer ID Application** or
+**Apple Development** certificate — so the Accessibility grant survives rebuilds
+(see below). With no certificate installed it falls back to an ad-hoc signature.
+Override the choice with `WIELD_SIGN_IDENTITY="<identity name>" ./build.sh`.
 
 ### First launch — grant Accessibility
 
@@ -63,6 +72,7 @@ open /Applications/Wield.app
 | Menu bar UI | SwiftUI `MenuBarExtra` |
 | Launch at login | `SMAppService` |
 | Resize preview | borderless click-through `NSWindow` in the accent color |
+| Skip full-screen apps | `AXFullScreen` attribute + frame-vs-display comparison |
 
 Coordinate note: the Accessibility API and Core Graphics events use a top-left
 origin, while AppKit windows use bottom-left. The overlay converts between them
@@ -88,18 +98,23 @@ Wield/
     ├── LoginItem.swift           # SMAppService launch-at-login
     ├── EventTapController.swift  # CGEventTap create / consume / re-enable
     ├── GestureController.swift   # move (live) + resize (preview) state machine
-    ├── AccessibilityWindow.swift # AX window get/set position & size
+    ├── AccessibilityWindow.swift # AX window get/set position & size, full-screen check
+    ├── ScreenGeometry.swift      # display bounds + full-screen-cover detection
     ├── ResizeZone.swift          # 8-direction resize math
     └── ResizeOverlay.swift       # accent-colored preview window
 ```
 
 ## Notes / limitations
 
-- **Ad-hoc signing & permission resets:** an ad-hoc signature changes on each
-  rebuild, so macOS may ask you to re-grant Accessibility after rebuilding. To
-  avoid this during development, sign with a stable self-signed certificate
-  (create one in Keychain Access ▸ Certificate Assistant) and replace
-  `codesign --sign -` in `build.sh` with `--sign "Your Cert Name"`.
+- **Signing & permission resets:** an ad-hoc signature changes on every rebuild,
+  which resets the Accessibility grant (System Settings keeps showing it ON, but
+  it stops working, because the entry points at the old code hash). `build.sh`
+  avoids this by preferring a real certificate — with a **Developer ID
+  Application** or **Apple Development** identity the designated requirement is
+  certificate/team-based and stays constant across rebuilds, so the grant
+  persists. Only when no certificate is installed does it fall back to ad-hoc;
+  in that case, create a self-signed certificate in Keychain Access ▸
+  Certificate Assistant and pass it via `WIELD_SIGN_IDENTITY`.
 - Some secure/system windows (login window, certain full-screen surfaces)
   cannot be moved via the Accessibility API and are silently ignored.
 - Move is applied live; to keep it smooth the window position is derived from a

@@ -60,12 +60,30 @@ struct AccessibilityWindow {
         Self.setPoint(frame.origin, of: element, attribute: kAXPositionAttribute)
     }
 
+    /// Whether the window is in macOS native full screen (the state entered via
+    /// the green traffic-light button). `AXFullScreen` is undocumented but
+    /// widely supported; apps that don't expose it simply report `false`, and
+    /// the frame-based `ScreenGeometry.coversWholeDisplay` check covers those
+    /// plus borderless full-screen games.
+    var isFullScreen: Bool {
+        Self.boolValue(of: element, attribute: "AXFullScreen") ?? false
+    }
+
     /// Brings the window to the front of its application.
     func raise() {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
 
     // MARK: - AX helpers
+
+    private static func boolValue(of element: AXUIElement, attribute: String) -> Bool? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFBooleanGetTypeID() else {
+            return nil
+        }
+        return CFBooleanGetValue((value as! CFBoolean))
+    }
 
     private static func role(of element: AXUIElement) -> String? {
         var value: CFTypeRef?

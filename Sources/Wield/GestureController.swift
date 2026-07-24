@@ -11,6 +11,9 @@ import CoreGraphics
 /// - Resize (right drag): only a translucent overlay follows the cursor; the
 ///   real window is resized once, on mouse up. This avoids live-resize redraw
 ///   glitches in the target app.
+/// - A right *click* (press and release without crossing `clickSlop`) is not
+///   a gesture: it is replayed to the app so modifier-aware context menus
+///   (e.g. Finder's Option variants) keep working while Wield is enabled.
 final class GestureController {
     private enum Mode { case idle, move, resize }
 
@@ -22,9 +25,13 @@ final class GestureController {
     private var initialMouse: CGPoint = .zero
     private var initialOrigin: CGPoint = .zero
     private var initialFrame: CGRect = .zero
+    private var initialFlags: CGEventFlags = []
+    private var hasDragged = false
     private var zone = ResizeZone(horizontal: .right, vertical: .bottom)
 
     private let minSize = CGSize(width: 120, height: 80)
+    /// Cursor travel below this many points counts as a click, not a drag.
+    private let clickSlop: CGFloat = 4
 
     init(state: AppState) {
         self.state = state
@@ -32,12 +39,13 @@ final class GestureController {
 
     /// Returns `true` to consume the event so it never reaches other apps.
     func handle(type: CGEventType, event: CGEvent) -> Bool {
-        guard state.enabled else { return false }
+        guard state.enabled, !Self.isSynthetic(event) else { return false }
         let location = event.location
 
         switch type {
         case .leftMouseDown:
-            guard mode == .idle, state.enableMove, modifierMatches(event.flags) else { return false }
+            guard mode == .idle, state.enableMove, modifierMatches(event.flags),
+                  !MenuWindows.anyOpen() else { return false }
             return beginMove(at: location)
 
         case .leftMouseDragged:
@@ -51,8 +59,9 @@ final class GestureController {
             return true
 
         case .rightMouseDown:
-            guard mode == .idle, state.enableResize, modifierMatches(event.flags) else { return false }
-            return beginResize(at: location)
+            guard mode == .idle, state.enableResize, modifierMatches(event.flags),
+                  !MenuWindows.anyOpen() else { return false }
+            return beginResize(at: location, flags: event.flags)
 
         case .rightMouseDragged:
             guard mode == .resize else { return false }
@@ -61,7 +70,11 @@ final class GestureController {
 
         case .rightMouseUp:
             guard mode == .resize else { return false }
-            commitResize()
+            if hasDragged {
+                commitResize()
+            } else {
+                replayAsRightClick()
+            }
             return true
 
         default:
@@ -95,26 +108,36 @@ final class GestureController {
 
     // MARK: - Resize
 
-    private func beginResize(at location: CGPoint) -> Bool {
+    /// Consumes the right-down provisionally. Raising the window and showing
+    /// the overlay wait until the cursor actually travels (`updateResize`), so
+    /// that a plain click can still be replayed untouched — with no overlay
+    /// flash and no z-order change the app never asked for.
+    private func beginResize(at location: CGPoint, flags: CGEventFlags) -> Bool {
         guard let window = AccessibilityWindow.window(at: location),
               let origin = window.position,
               let size = window.size,
               isGrabbable(window, frame: CGRect(origin: origin, size: size)) else {
             return false
         }
-        window.raise()
         targetWindow = window
         initialMouse = location
+        initialFlags = flags
         initialFrame = CGRect(origin: origin, size: size)
         zone = ResizeZone.zone(for: location, in: initialFrame)
+        hasDragged = false
         mode = .resize
-        overlay.show(axFrame: initialFrame)
         return true
     }
 
     private func updateResize(to location: CGPoint) {
         let dx = location.x - initialMouse.x
         let dy = location.y - initialMouse.y
+        if !hasDragged {
+            guard hypot(dx, dy) > clickSlop else { return }
+            hasDragged = true
+            targetWindow?.raise()
+            overlay.show(axFrame: initialFrame)
+        }
         let newFrame = zone.apply(dx: dx, dy: dy, to: initialFrame, minSize: minSize)
         overlay.update(axFrame: newFrame)
     }
@@ -126,11 +149,42 @@ final class GestureController {
         finish()
     }
 
+    /// The consumed right-down turned out to be a plain click, not a resize:
+    /// cancel the gesture and replay the click (original modifiers included)
+    /// so the app opens its context menu as if Wield were not there. The
+    /// replayed events carry `syntheticMarker`, which `handle` passes through.
+    private func replayAsRightClick() {
+        let location = initialMouse
+        let flags = initialFlags
+        finish()
+
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+        source.userData = Self.syntheticMarker
+        for type in [CGEventType.rightMouseDown, .rightMouseUp] {
+            guard let click = CGEvent(
+                mouseEventSource: source,
+                mouseType: type,
+                mouseCursorPosition: location,
+                mouseButton: .right
+            ) else { continue }
+            click.flags = flags
+            click.setIntegerValueField(.mouseEventClickState, value: 1)
+            click.post(tap: .cghidEventTap)
+        }
+    }
+
     // MARK: - Shared
 
     private func finish() {
         mode = .idle
         targetWindow = nil
+        hasDragged = false
+    }
+
+    private static let syntheticMarker: Int64 = 0x5749_454C_44 // "WIELD"
+
+    private static func isSynthetic(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == syntheticMarker
     }
 
     /// Windows that fill their entire display — native full screen, borderless
